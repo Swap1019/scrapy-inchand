@@ -26,26 +26,11 @@ DOWNLOADER_MIDDLEWARES = {
     'scrapy_user_agents.middlewares.RandomUserAgentMiddleware': 400,
 }
 
-FEEDS = {
-    "categories.json": {
-        "format": "json",
-        "item_filter": "inchand.filters.CategoryFilter",
-    },
-    "shop.json": {
-        "format": "json",
-        "item_filter": "inchand.filters.ShopFilter",
-    },
-}
-
 # Redis connection
 REDIS_HOST = "localhost"
 REDIS_PORT = 6379
-REDIS_ITEMS_KEY = "%(spider)s:items"
-REDIS_ITEMS_SERIALIZER = "json"
-
 ITEM_PIPELINES = {
-    "scrapy_redis.pipelines.RedisPipeline": 100,
-    "inchand.pipelines.RedisStorePipeline": 200,
+    "inchand.pipelines.RedisStorePipeline": 100,
 }
 
 # scrapy-redis core settings
@@ -61,3 +46,6 @@ DUPEFILTER_DEBUG = True
 SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.SpiderQueue"
 
 AUTOTHROTTLE_ENABLED = True
+
+SPIDER_ERROR_LOG_FILE = "logs/spider_errors.jsonl"
+PIPELINE_LOG_FILE = "logs/pipeline_events.jsonl"
