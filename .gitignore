@@ -1,0 +1,36 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor/OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Scrapy runtime artifacts
+.scrapy/
+inchand/.scrapy/
+# Local exports and temporary data
+*.jsonl
+categories.json
+shop.json

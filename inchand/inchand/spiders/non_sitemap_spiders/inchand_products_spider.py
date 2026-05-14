@@ -1,29 +1,96 @@
-from scrapy_redis.spiders import RedisSpider
+import json
+from pathlib import Path
+import scrapy
 from scrapy.loader import ItemLoader
 from inchand.items import InchandProductItem
 from inchand.log_store import append_jsonl
 
 
-class InchandProductsSpider(RedisSpider):
+class InchandProductsSpider(scrapy.Spider):
     name = "inchand_products"
-    redis_key = "shop_urls"
     allowed_domains = ["inchand.com"]
+    start_urls = []
+    default_urls_file = "data/non-sitemap-extracted-data/my_shops_no_sitemap.json"
+    # redis_key = "shop_urls"
 
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
         spider = super().from_crawler(crawler, *args, **kwargs)
         spider.spider_error_log_file = crawler.settings.get(
-            "SPIDER_ERROR_LOG_FILE", "logs/spider_errors.jsonl"
+            "SPIDER_ERROR_LOG_FILE", "data/logs/spider_errors.jsonl"
         )
         return spider
 
-    def make_request_from_data(self, data):
-        request = super().make_request_from_data(data)
-        if request is None:
-            return None
-        request.errback = self.handle_request_error
-        request.meta["handle_httpstatus_all"] = True
-        return request
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.urls_file = kwargs.get("urls_file", self.default_urls_file)
+        self._seen_urls = set()
+
+    def _resolve_urls_path(self):
+        configured = Path(self.urls_file)
+        if configured.is_absolute():
+            return configured
+
+        candidates = [configured]
+        # Project root is .../inchand (next to scrapy.cfg and data/)
+        project_root = Path(__file__).resolve().parents[3]
+        candidates.append(project_root / configured)
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return configured
+
+    def _load_shop_urls(self):
+        path = self._resolve_urls_path()
+        if not path.exists():
+            self.logger.error("Shop URLs file not found: %s", path)
+            return []
+
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+            if not raw:
+                return []
+            payload = json.loads(raw)
+        except Exception as exc:
+            self.logger.error("Failed to parse shop URLs file %s: %r", path, exc)
+            return []
+
+        if isinstance(payload, dict):
+            urls = payload.get("urls", [])
+        elif isinstance(payload, list):
+            urls = payload
+        else:
+            urls = []
+
+        cleaned = []
+        seen = set()
+        for url in urls:
+            url = str(url).strip()
+            if not url or url in seen:
+                continue
+            if "/shop/" not in url:
+                continue
+            seen.add(url)
+            cleaned.append(url)
+        return cleaned
+
+    def start_requests(self):
+        urls = self._load_shop_urls()
+        if not urls:
+            self.logger.warning("No shop URLs loaded from %s", self.urls_file)
+            return
+
+        for url in urls:
+            if url in self._seen_urls:
+                continue
+            self._seen_urls.add(url)
+            yield scrapy.Request(
+                url,
+                callback=self.parse,
+                errback=self.handle_request_error,
+                meta={"handle_httpstatus_all": True},
+            )
 
     def log_http_error(self, response):
         append_jsonl(
@@ -69,6 +136,29 @@ class InchandProductsSpider(RedisSpider):
         return specs
 
     def parse(self, response):
+        if response.status != 200:
+            self.log_http_error(response)
+            return
+
+        product_title = response.css("h1.text-black.text-lg.font-semibold::text").get()
+        if product_title:
+            yield from self.parse_product(response)
+            return
+
+        for href in response.css("a::attr(href)").getall():
+            url = response.urljoin(href)
+            if "/shop/" not in url:
+                continue
+            if any(x in url for x in ["#", "javascript:", ".jpg", ".png", ".svg", ".css", ".js"]):
+                continue
+            yield scrapy.Request(
+                url,
+                callback=self.parse,
+                errback=self.handle_request_error,
+                meta={"handle_httpstatus_all": True},
+            )
+
+    def parse_product(self, response):
         if response.status != 200:
             self.log_http_error(response)
             return

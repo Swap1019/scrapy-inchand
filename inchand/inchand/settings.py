@@ -2,10 +2,17 @@
 
 BOT_NAME = "inchand"
 
-SPIDER_MODULES = ["inchand.spiders"]
-NEWSPIDER_MODULE = "inchand.spiders"
+SPIDER_MODULES = [
+    "inchand.spiders.non_sitemap_spiders",
+    "inchand.spiders.sitemap_spiders",
+]
+NEWSPIDER_MODULE = "inchand.spiders.non_sitemap_spiders"
 
 ADDONS = {}
+
+EXTENSIONS = {
+    "inchand.extensions.CrawlTimingExtension": 500,
+}
 
 
 # Obey robots.txt rules
@@ -26,26 +33,27 @@ DOWNLOADER_MIDDLEWARES = {
     'scrapy_user_agents.middlewares.RandomUserAgentMiddleware': 400,
 }
 
-# Redis connection
-REDIS_HOST = "localhost"
-REDIS_PORT = 6379
-ITEM_PIPELINES = {
-    "inchand.pipelines.RedisStorePipeline": 100,
-}
+# Redis connection (disabled for now)
+# REDIS_HOST = "localhost"
+# REDIS_PORT = 6379
+# ITEM_PIPELINES = {
+#     "inchand.pipelines.RedisStorePipeline": 100,
+# }
 
-# scrapy-redis core settings
-SCHEDULER = "scrapy_redis.scheduler.Scheduler"
-DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
+# scrapy-redis core settings (disabled for now)
+# SCHEDULER = "scrapy_redis.scheduler.Scheduler"
+# DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
 
-# Keep queue after shutdown
-SCHEDULER_PERSIST = True
+# Keep queue after shutdown (disabled for now)
+# SCHEDULER_PERSIST = True
 
 DUPEFILTER_DEBUG = True
 
-# prevent memory blowup
-SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.SpiderQueue"
+# prevent memory blowup (disabled for now)
+# SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.SpiderQueue"
 
 AUTOTHROTTLE_ENABLED = True
 
-SPIDER_ERROR_LOG_FILE = "logs/spider_errors.jsonl"
-PIPELINE_LOG_FILE = "logs/pipeline_events.jsonl"
+SPIDER_ERROR_LOG_FILE = "data/logs/spider_errors.jsonl"
+PIPELINE_LOG_FILE = "data/logs/pipeline_events.jsonl"
+CRAWL_TIMING_LOG_FILE = "data/logs/crawl_timings.jsonl"
