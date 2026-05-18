@@ -31,6 +31,3 @@ htmlcov/
 .scrapy/
 inchand/.scrapy/
 # Local exports and temporary data
-*.jsonl
-categories.json
-shop.json
