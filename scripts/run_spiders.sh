@@ -5,17 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRAPY_DIR="$ROOT_DIR/inchand"
 SCRAPY_BIN_DEFAULT="$ROOT_DIR/.venv/bin/scrapy"
 
-INDEX_FILE="${INDEX_FILE:-data/sitemap-extracted-data/sitemap_index.json}"
-SITEMAP_SHOP_FILE="${SITEMAP_SHOP_FILE:-data/sitemap-extracted-data/my_shop.json}"
+SITEMAP_SHOP_FILE="${SITEMAP_SHOP_FILE:-data/sitemap-extracted-data/my_shops.json}"
 SITEMAP_CATEGORY_FILE="${SITEMAP_CATEGORY_FILE:-data/sitemap-extracted-data/my_categories.json}"
-SITEMAP_VENDOR_FILE="${SITEMAP_VENDOR_FILE:-data/sitemap-extracted-data/my_vendors.json}"
-SITEMAP_PRODUCTS_FILE="${SITEMAP_PRODUCTS_FILE:-data/sitemap-extracted-data/my_products.json}"
-
-DIRECT_SHOP_FILE="${DIRECT_SHOP_FILE:-data/non-sitemap-extracted-data/my_shops_no_sitemap.json}"
-DIRECT_CATEGORY_FILE="${DIRECT_CATEGORY_FILE:-data/non-sitemap-extracted-data/my_categories_no_sitemap.json}"
-DIRECT_VENDOR_FILE="${DIRECT_VENDOR_FILE:-data/non-sitemap-extracted-data/my_vendors_no_sitemap.json}"
-DIRECT_PRODUCTS_FILE="${DIRECT_PRODUCTS_FILE:-data/non-sitemap-extracted-data/my_products_no_sitemap.json}"
-
+SITEMAP_PRODUCTS_FILE="${SITEMAP_PRODUCTS_FILE:-data/sitemap-extracted-data/my_products.jsonl}"
+SITEMAP_OUTPUT_MODE="${SITEMAP_OUTPUT_MODE:-resume}"
 LOG_DIR="${LOG_DIR:-data/logs}"
 
 usage() {
@@ -26,14 +19,10 @@ Usage:
 Commands:
   list               List available spiders
 
-  sitemap-index      Run sitemap index spider
-  sitemap-urls       Run sitemap URLs spider (shop/category/vendor extraction)
+  sitemap-urls       Run sitemap URLs spider (shop/category extraction)
   sitemap-products   Run sitemap products spider
-  sitemap-all        Run full sitemap flow: index -> urls -> products
-
-  direct-urls        Run direct URL discovery spider
-  direct-products    Run direct products spider
-  direct-all         Run full direct flow: urls -> products
+  sitemap-update     Run sitemap products updater spider
+  sitemap-all        Run full sitemap flow: urls -> products
 
   logs               Tail spider error + crawl timing logs
   help               Show this help
@@ -42,8 +31,8 @@ Notes:
   - Run this script from anywhere inside the repository.
   - By default it uses ./.venv/bin/scrapy if available.
   - Output paths can be overridden with environment variables:
-    INDEX_FILE, SITEMAP_SHOP_FILE, SITEMAP_PRODUCTS_FILE,
-    DIRECT_SHOP_FILE, DIRECT_PRODUCTS_FILE, LOG_DIR
+    SITEMAP_SHOP_FILE, SITEMAP_CATEGORY_FILE, SITEMAP_PRODUCTS_FILE,
+    SITEMAP_OUTPUT_MODE (resume|overwrite), LOG_DIR
 USAGE
 }
 
@@ -71,43 +60,43 @@ run_scrapy() {
   )
 }
 
-run_sitemap_index() {
-  run_scrapy crawl inchand_sitemap_index -O "$INDEX_FILE"
-}
-
 run_sitemap_urls() {
   run_scrapy crawl inchand_sitemap_urls \
-    -a index_file="$INDEX_FILE" \
     -a shop_output_file="$SITEMAP_SHOP_FILE" \
-    -a category_output_file="$SITEMAP_CATEGORY_FILE" \
-    -a vendor_output_file="$SITEMAP_VENDOR_FILE"
+    -a category_output_file="$SITEMAP_CATEGORY_FILE"
 }
 
 run_sitemap_products() {
+  local output_file="$SITEMAP_PRODUCTS_FILE"
+  local mode="$SITEMAP_OUTPUT_MODE"
+
+  if [[ "$mode" == "resume" ]]; then
+    if [[ "$output_file" != *.jsonl ]]; then
+      echo "Error: resume mode requires a .jsonl output file. Current: $output_file" >&2
+      echo "Hint: use SITEMAP_PRODUCTS_FILE=data/sitemap-extracted-data/my_products.jsonl" >&2
+      exit 1
+    fi
+    run_scrapy crawl inchand_sitemap_products \
+      -a urls_file="$SITEMAP_SHOP_FILE" \
+      -a products_file="$output_file" \
+      -o "$output_file"
+    return
+  fi
+
   run_scrapy crawl inchand_sitemap_products \
     -a urls_file="$SITEMAP_SHOP_FILE" \
-    -O "$SITEMAP_PRODUCTS_FILE"
+    -a products_file="$output_file" \
+    -O "$output_file"
 }
 
-run_direct_urls() {
-  run_scrapy crawl inchand_urls \
-    -a shop_output_file="$DIRECT_SHOP_FILE" \
-    -a category_output_file="$DIRECT_CATEGORY_FILE" \
-    -a vendor_output_file="$DIRECT_VENDOR_FILE"
-}
-
-run_direct_products() {
-  run_scrapy crawl inchand_products \
-    -a urls_file="$DIRECT_SHOP_FILE" \
-    -O "$DIRECT_PRODUCTS_FILE"
+run_sitemap_update() {
+  run_scrapy crawl inchand_sitemap_products_update \
+    -a products_file="$SITEMAP_PRODUCTS_FILE"
 }
 
 case "${1:-help}" in
   list)
     run_scrapy list
-    ;;
-  sitemap-index)
-    run_sitemap_index
     ;;
   sitemap-urls)
     run_sitemap_urls
@@ -115,20 +104,12 @@ case "${1:-help}" in
   sitemap-products)
     run_sitemap_products
     ;;
+  sitemap-update)
+    run_sitemap_update
+    ;;
   sitemap-all)
-    run_sitemap_index
     run_sitemap_urls
     run_sitemap_products
-    ;;
-  direct-urls)
-    run_direct_urls
-    ;;
-  direct-products)
-    run_direct_products
-    ;;
-  direct-all)
-    run_direct_urls
-    run_direct_products
     ;;
   logs)
     tail -f "$SCRAPY_DIR/$LOG_DIR/spider_errors.jsonl" "$SCRAPY_DIR/$LOG_DIR/crawl_timings.jsonl"

@@ -56,12 +56,27 @@ Common commands:
 Step-by-step commands:
 
 ```bash
-./scripts/run_spiders.sh sitemap-index
 ./scripts/run_spiders.sh sitemap-urls
 ./scripts/run_spiders.sh sitemap-products
+./scripts/run_spiders.sh sitemap-update
 ./scripts/run_spiders.sh direct-urls
 ./scripts/run_spiders.sh direct-products
 ```
+
+### Resume Mode Design (`run_spiders.sh`)
+
+`sitemap-products` defaults to `SITEMAP_OUTPUT_MODE=resume`.
+
+Primary output is JSONL (`my_products.jsonl`), and resume mode appends directly:
+
+1. Spider loads already-seen URLs from `products_file`.
+2. Feed export appends new items to the same `.jsonl` file with `-o`.
+
+Why this choice:
+
+- JSONL is append-friendly and robust for long crawls/restarts.
+- New data is persisted incrementally during crawl.
+- No end-of-run merge step is required.
 
 ## Run Commands
 
@@ -69,28 +84,27 @@ Step-by-step commands:
 
 This mode reads URLs from sitemap XML files.
 
-1. Extract sitemap index URLs:
-
-```bash
-../.venv/bin/scrapy crawl inchand_sitemap_index -O data/sitemap-extracted-data/sitemap_index.json
-```
-
-2. Extract page URLs (shop/category/vendor) from sitemap index:
+1. Extract page URLs (shop/category) directly from sitemap endpoints:
 
 ```bash
 ../.venv/bin/scrapy crawl inchand_sitemap_urls \
-  -a index_file=data/sitemap-extracted-data/sitemap_index.json \
   -a shop_output_file=data/sitemap-extracted-data/my_shop.json \
-  -a category_output_file=data/sitemap-extracted-data/my_categories.json \
-  -a vendor_output_file=data/sitemap-extracted-data/my_vendors.json
+  -a category_output_file=data/sitemap-extracted-data/my_categories.json
 ```
 
-3. Scrape product data from the sitemap shop URL file:
+2. Scrape product data from the sitemap shop URL file:
 
 ```bash
 ../.venv/bin/scrapy crawl inchand_sitemap_products \
   -a urls_file=data/sitemap-extracted-data/my_shop.json \
-  -O data/sitemap-extracted-data/my_products.json
+  -o data/sitemap-extracted-data/my_products.jsonl
+```
+
+3. Update existing product records by checking field changes:
+
+```bash
+../.venv/bin/scrapy crawl inchand_sitemap_products_update \
+  -a products_file=data/sitemap-extracted-data/my_products.jsonl
 ```
 
 ### Option B: Direct Website Crawl (Non-Sitemap)
@@ -121,20 +135,68 @@ This writes:
 
 ### Sitemap Flow
 
-1. `inchand_sitemap_index`
-- Reads sitemap index endpoints (`/sitemap.xml`).
-- Exports sitemap file URLs to `data/sitemap-extracted-data/sitemap_index.json`.
+1. `inchand_sitemap_urls`
+- Starts from sitemap endpoints (`/sitemap.xml`).
+- Follows sitemap index entries internally.
+- Extracts and saves page URLs into:
+`my_shop.json`, `my_categories.json`.
 
-2. `inchand_sitemap_urls`
-- Reads `sitemap_index.json`.
-- Opens each sitemap file and extracts page URLs.
-- Splits and saves URLs into:
-`my_shop.json`, `my_categories.json`, `my_vendors.json`.
-
-3. `inchand_sitemap_products`
+2. `inchand_sitemap_products`
 - Reads shop URLs from `my_shop.json`.
 - Visits only product pages and extracts product data.
-- Writes final product dataset (for example `my_products.json`).
+- Writes product dataset to `my_products.jsonl`.
+
+3. `inchand_sitemap_products_update`
+- Reads product URLs from `my_products.jsonl`.
+- Re-fetches each product page and compares tracked fields.
+- Updates only changed records and sets `updated_date` to current time.
+- Rewrites `my_products.jsonl` atomically when changes exist.
+
+### Updater Spider Rules
+
+Spider: `inchand_sitemap_products_update`
+
+Run:
+
+```bash
+./scripts/run_spiders.sh sitemap-update
+```
+
+Update prioritization:
+
+- Products with discount first (`discount_percent > 0`)
+- Higher discount percent first
+- Then products without discount
+- Lower `number_of_inactivity` first
+
+Immutable fields (not updated by updater):
+
+- `dbid`
+- `uuid`
+- `brand`
+- `website`
+- `url`
+- `user_like`
+- `user_dislike`
+- `created_date`
+- `admin_marked_fake`
+- `scam_score`
+- `is_vectorized`
+
+Activity/inactivity behavior:
+
+- If `selling_price` is empty:
+  - `is_active = false`
+  - `number_of_inactivity = previous + 1`
+- If `selling_price` exists:
+  - `is_active = true`
+  - `number_of_inactivity = 0`
+
+File behavior:
+
+- Input/output is `data/sitemap-extracted-data/my_products.jsonl`
+- Records are stored in the same one-line-JSON format (field values wrapped in single-item lists)
+- File rewrite is atomic (`.tmp` + replace) when there are changes
 
 ### Direct (Non-Sitemap) Flow
 

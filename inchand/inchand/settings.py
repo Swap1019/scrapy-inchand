@@ -3,7 +3,6 @@
 BOT_NAME = "inchand"
 
 SPIDER_MODULES = [
-    "inchand.spiders.non_sitemap_spiders",
     "inchand.spiders.sitemap_spiders",
 ]
 NEWSPIDER_MODULE = "inchand.spiders.non_sitemap_spiders"
