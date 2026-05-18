@@ -2,7 +2,43 @@
 import scrapy
 
 
+class ProductItem(scrapy.Item):
+    dbid = scrapy.Field()
+    uuid = scrapy.Field()
+    title_fa = scrapy.Field()
+    description = scrapy.Field()
+    title_en = scrapy.Field()
+    supply_category = scrapy.Field()
+    category1 = scrapy.Field()
+    category2 = scrapy.Field()
+    category3 = scrapy.Field()
+    category4 = scrapy.Field()
+    category5 = scrapy.Field()
+    brand = scrapy.Field()
+    website = scrapy.Field()
+    url = scrapy.Field()
+    is_active = scrapy.Field()
+    image_url = scrapy.Field()
+    selling_price = scrapy.Field()
+    rrp_price = scrapy.Field()
+    discount_percent = scrapy.Field()
+    number_of_inactivity = scrapy.Field()
+    is_fake = scrapy.Field()
+    user_like = scrapy.Field()
+    user_dislike = scrapy.Field()
+    created_date = scrapy.Field() 
+    updated_date = scrapy.Field()
+    admin_marked_fake = scrapy.Field()
+    mean_of_prices = scrapy.Field()
+    variants = scrapy.Field()
+    variant_id = scrapy.Field()
+    scam_score = scrapy.Field()
+    is_vectorized = scrapy.Field()
+
+
 class InchandProductItem(scrapy.Item):
+    dbid = scrapy.Field()
+    uuid = scrapy.Field()
     url = scrapy.Field()
     persian_title = scrapy.Field()
     english_title = scrapy.Field()
