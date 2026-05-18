@@ -1,15 +1,11 @@
 # Inchand Scrapy Crawler
 
-Crawler for `inchand.com` with two strategies:
-
-1. Sitemap-based crawl: uses sitemap URLs as the source of truth.
-2. Direct website crawl (non-sitemap): discovers URLs by crawling site pages.
+Crawler for `inchand.com` using sitemap-based spiders.
 
 ## Project Structure
 
 - `inchand/`: Scrapy project root (`scrapy.cfg`)
 - `inchand/inchand/spiders/sitemap_spiders/`: sitemap-based spiders
-- `inchand/inchand/spiders/non_sitemap_spiders/`: direct-crawl spiders
 - `inchand/inchand/extensions.py`: crawl timing extension
 - `inchand/inchand/log_store.py`: JSONL log writer
 - `inchand/data/`: extracted outputs and logs
@@ -49,7 +45,6 @@ Common commands:
 ```bash
 ./scripts/run_spiders.sh list
 ./scripts/run_spiders.sh sitemap-all
-./scripts/run_spiders.sh direct-all
 ./scripts/run_spiders.sh logs
 ```
 
@@ -59,8 +54,6 @@ Step-by-step commands:
 ./scripts/run_spiders.sh sitemap-urls
 ./scripts/run_spiders.sh sitemap-products
 ./scripts/run_spiders.sh sitemap-update
-./scripts/run_spiders.sh direct-urls
-./scripts/run_spiders.sh direct-products
 ```
 
 ### Resume Mode Design (`run_spiders.sh`)
@@ -80,7 +73,7 @@ Why this choice:
 
 ## Run Commands
 
-### Option A: Sitemap-Based Crawl
+### Sitemap-Based Crawl
 
 This mode reads URLs from sitemap XML files.
 
@@ -105,30 +98,6 @@ This mode reads URLs from sitemap XML files.
 ```bash
 ../.venv/bin/scrapy crawl inchand_sitemap_products_update \
   -a products_file=data/sitemap-extracted-data/my_products.jsonl
-```
-
-### Option B: Direct Website Crawl (Non-Sitemap)
-
-This mode discovers URLs directly from the website HTML (starting at `https://inchand.com`).
-
-1. Discover shop/category/vendor URLs:
-
-```bash
-../.venv/bin/scrapy crawl inchand_urls
-```
-
-This writes:
-
-- `data/non-sitemap-extracted-data/my_shops_no_sitemap.json`
-- `data/non-sitemap-extracted-data/my_categories_no_sitemap.json`
-- `data/non-sitemap-extracted-data/my_vendors_no_sitemap.json`
-
-2. Scrape product data from discovered shop URLs:
-
-```bash
-../.venv/bin/scrapy crawl inchand_products \
-  -a urls_file=data/non-sitemap-extracted-data/my_shops_no_sitemap.json \
-  -O data/non-sitemap-extracted-data/my_products_no_sitemap.json
 ```
 
 ## Spider Flows
@@ -197,19 +166,6 @@ File behavior:
 - Input/output is `data/sitemap-extracted-data/my_products.jsonl`
 - Records are stored in the same one-line-JSON format (field values wrapped in single-item lists)
 - File rewrite is atomic (`.tmp` + replace) when there are changes
-
-### Direct (Non-Sitemap) Flow
-
-1. `inchand_urls`
-- Starts from `https://inchand.com`.
-- Crawls links directly from HTML pages.
-- Discovers and saves shop/category/vendor URLs into
-`data/non-sitemap-extracted-data/*.json`.
-
-2. `inchand_products`
-- Reads shop URLs from `my_shops_no_sitemap.json`.
-- Visits product pages and extracts product data.
-- Writes final product dataset (for example `my_products_no_sitemap.json`).
 
 ## Crawl Time Extension
 
