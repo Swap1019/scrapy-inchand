@@ -48,19 +48,13 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
         "is_vectorized",
     ]
 
-    immutable_fields = {
-        "dbid",
-        "uuid",
-        "brand",
-        "website",
-        "url",
-        "user_like",
-        "user_dislike",
-        "created_date",
-        "admin_marked_fake",
-        "scam_score",
-        "is_vectorized",
-    }
+    mutable_fields = [
+        "is_active",
+        "selling_price",
+        "rrp_price",
+        "discount_percent",
+        "number_of_inactivity",
+    ]
 
     output_fields = tracked_fields + ["updated_date"]
 
@@ -78,14 +72,10 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
         self._records_by_url = {}
         self._ordered_urls = []
         self._orphan_records = []
-        self._line_fields_order = []
-        self.comparable_fields = [
-            f for f in self.tracked_fields if f not in self.immutable_fields
-        ]
+        self.comparable_fields = list(self.mutable_fields)
         self._seen_request_urls = set()
         self._updated_count = 0
         self._unchanged_count = 0
-        self._new_count = 0
         self._load_existing_records()
 
     def _resolve_products_path(self):
@@ -112,6 +102,76 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
             return self._unwrap(value[0])
         return value
 
+    def _extract_next_data(self, response):
+        raw = response.xpath('//script[@id="__NEXT_DATA__"]/text()').get()
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self.logger.warning(
+                "Failed to parse __NEXT_DATA__ from %s: %r", response.url, exc
+            )
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _extract_page_props(self, response):
+        payload = self._extract_next_data(response)
+        page_props = payload.get("props", {}).get("pageProps", {})
+        return page_props if isinstance(page_props, dict) else {}
+
+    def _extract_product(self, response):
+        page_props = self._extract_page_props(response)
+        product = page_props.get("product")
+        return product if isinstance(product, dict) else None
+
+    def _extract_price_related(self, product, old_plain):
+        old_inactivity = self._parse_inactivity(old_plain.get("number_of_inactivity"))
+
+        if not isinstance(product, dict):
+            return {
+                "selling_price": "",
+                "rrp_price": "",
+                "discount_percent": "",
+                "is_active": False,
+                "number_of_inactivity": old_inactivity + 1,
+            }
+
+        offer = product.get("offer")
+        if not isinstance(offer, dict):
+            return {
+                "selling_price": "",
+                "rrp_price": "",
+                "discount_percent": "",
+                "is_active": False,
+                "number_of_inactivity": old_inactivity + 1,
+            }
+        
+        availability = offer.get("availability")
+        if not availability:
+            return {
+                "selling_price": "",
+                "rrp_price": "",
+                "discount_percent": "",
+                "is_active": False,
+                "number_of_inactivity": old_inactivity + 1,
+            }
+
+        selling_price = offer.get("price") or ""
+        rrp_price = offer.get("base_price") or selling_price
+
+        discount_percent = offer.get("discount_percent")
+        if discount_percent in (None, ""):
+            discount_percent = ""
+
+        return {
+            "selling_price": selling_price,
+            "rrp_price": rrp_price,
+            "discount_percent": discount_percent,
+            "is_active": True,
+            "number_of_inactivity": 0,
+        }
+
     def _extract_url_from_record(self, record):
         if not isinstance(record, dict):
             return ""
@@ -119,11 +179,8 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
         return str(value).strip() if value is not None else ""
 
     def _to_line_record(self, plain_record, template_line=None):
-        keys = []
         if template_line and isinstance(template_line, dict):
             keys = list(template_line.keys())
-        elif self._line_fields_order:
-            keys = list(self._line_fields_order)
         else:
             keys = list(self.output_fields)
 
@@ -203,9 +260,6 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
                 self.logger.warning("Skipping malformed JSONL line in %s", path)
                 continue
 
-            if not self._line_fields_order and isinstance(rec, dict):
-                self._line_fields_order = list(rec.keys())
-
             url = self._extract_url_from_record(rec)
             if not url:
                 self._orphan_records.append(rec)
@@ -263,112 +317,18 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
                 meta={"handle_httpstatus_all": True},
             )
 
-    def extract_dbid_and_uuid(self, response):
-        persian_to_english = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
-        text = response.xpath(
-            '//div[contains(@class, "text-center") and contains(@class, "text-neutral-400")]/text()[last()]'
-        ).get()
-        if text:
-            product_id = text.strip().translate(persian_to_english)
-            return {"dbid": f"inchand-{product_id}", "uuid": product_id}
-        return {"dbid": "", "uuid": ""}
-
-    def extract_price_related(self, response, old_plain):
-        selling_price = response.css(".font-semibold.text-black.text-2xl::text").get()
-        if not selling_price:
-            old_inactivity = old_plain.get("number_of_inactivity", 0)
-            try:
-                old_inactivity = int(old_inactivity)
-            except (TypeError, ValueError):
-                old_inactivity = 0
-            return {
-                "selling_price": "",
-                "rrp_price": "",
-                "discount_percent": "",
-                "is_active": False,
-                "number_of_inactivity": old_inactivity + 1,
-            }
-
-        discount_percent = response.css(
-            ".bg-secondary-color.px-2\\.5.text-black.font-medium.rounded-2xl::text"
-        ).get()
-        if discount_percent:
-            return {
-                "selling_price": selling_price,
-                "rrp_price": response.css(
-                    ".font-light.text-lg.text-neutral-400.line-through.relative.top-0\\.5.ml-2::text"
-                ).get(),
-                "discount_percent": discount_percent,
-                "is_active": True,
-                "number_of_inactivity": 0,
-            }
-        return {
-            "selling_price": selling_price,
-            "rrp_price": selling_price,
-            "discount_percent": "",
-            "is_active": True,
-            "number_of_inactivity": 0,
-        }
-
-    def extract_brand(self, response):
-        brand = response.xpath(
-            '//span[contains(@class, "pl-3") and contains(@class, "ml-3") and contains(@class, "border-l") and contains(@class, "border-slate-300")]/text()[last()]'
-        ).get()
-        return brand.strip() if brand else ""
-
-    def extract_title_en(self, response):
-        jalali_date_pattern = re.compile(r"^[۰-۹]{4}/[۰-۹]{2}/[۰-۹]{2}$")
-        text = response.css("div.text-neutral-400.text-sm::text").get()
-        if not text:
-            return ""
-        text = text.strip()
-        if jalali_date_pattern.match(text):
-            return ""
-        return text
-
-    def extract_primary_image(self, response):
-        return response.css("img.object-contain.h-full.w-full::attr(src)").get() or ""
-
     def _build_plain_record(self, response, old_plain):
-        extracted_price_related = self.extract_price_related(response, old_plain)
-        extracted_dbid_and_uuid = self.extract_dbid_and_uuid(response)
+        product = self._extract_product(response)
+        extracted_price_related = self._extract_price_related(product, old_plain)
         now_str = self._now_string()
 
-        created_date = old_plain.get("created_date") if old_plain else now_str
-
-        rec = {
-            "dbid": old_plain.get("dbid") or extracted_dbid_and_uuid["dbid"],
-            "uuid": old_plain.get("uuid") or extracted_dbid_and_uuid["uuid"],
-            "title_fa": (response.css("h1.text-black.text-lg.font-semibold::text").get() or ""),
-            "description": "",
-            "title_en": self.extract_title_en(response),
-            "supply_category": "",
-            "category1": "",
-            "category2": "",
-            "category3": "",
-            "category4": "",
-            "category5": "",
-            "brand": old_plain.get("brand") or self.extract_brand(response),
-            "website": old_plain.get("website", ""),
-            "url": old_plain.get("url") or response.url,
-            "is_active": extracted_price_related["is_active"],
-            "image_url": self.extract_primary_image(response),
-            "selling_price": extracted_price_related["selling_price"],
-            "rrp_price": extracted_price_related["rrp_price"],
-            "discount_percent": extracted_price_related["discount_percent"],
-            "number_of_inactivity": extracted_price_related["number_of_inactivity"],
-            "is_fake": old_plain.get("is_fake", False) if old_plain else False,
-            "user_like": old_plain.get("user_like", 0) if old_plain else 0,
-            "user_dislike": old_plain.get("user_dislike", 0) if old_plain else 0,
-            "created_date": created_date,
-            "admin_marked_fake": old_plain.get("admin_marked_fake", False) if old_plain else False,
-            "mean_of_prices": extracted_price_related["selling_price"],
-            "variants": "",
-            "variant_id": "",
-            "scam_score": old_plain.get("scam_score", "") if old_plain else "",
-            "is_vectorized": old_plain.get("is_vectorized", False) if old_plain else False,
-            "updated_date": old_plain.get("updated_date", now_str) if old_plain else now_str,
-        }
+        rec = dict(old_plain)
+        rec["is_active"] = extracted_price_related["is_active"]
+        rec["selling_price"] = extracted_price_related["selling_price"]
+        rec["rrp_price"] = extracted_price_related["rrp_price"]
+        rec["discount_percent"] = extracted_price_related["discount_percent"]
+        rec["number_of_inactivity"] = extracted_price_related["number_of_inactivity"]
+        rec["updated_date"] = now_str
         return rec
 
     def _has_changed(self, old_plain, new_plain):
@@ -384,17 +344,13 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
 
         url = response.url
         old_line = self._records_by_url.get(url)
-        old_plain = self._line_to_plain(old_line) if old_line else {}
+        if not old_line:
+            self.logger.warning("Skipping URL not found in existing products file: %s", url)
+            return
+
+        old_plain = self._line_to_plain(old_line)
 
         new_plain = self._build_plain_record(response, old_plain)
-
-        if not old_line:
-            new_plain["updated_date"] = self._now_string()
-            self._records_by_url[url] = self._to_line_record(new_plain)
-            if url not in self._ordered_urls:
-                self._ordered_urls.append(url)
-            self._new_count += 1
-            return
 
         if self._has_changed(old_plain, new_plain):
             new_plain["updated_date"] = self._now_string()
@@ -404,7 +360,7 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
             self._unchanged_count += 1
 
     def closed(self, reason):
-        changed = self._new_count + self._updated_count
+        changed = self._updated_count
         if changed == 0:
             self.logger.info(
                 "Update finished. No changes detected. unchanged=%d",
@@ -429,9 +385,8 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
 
         os.replace(tmp_path, path)
         self.logger.info(
-            "Update finished. updated=%d new=%d unchanged=%d written=%s",
+            "Update finished. updated=%d unchanged=%d written=%s",
             self._updated_count,
-            self._new_count,
             self._unchanged_count,
             path,
         )

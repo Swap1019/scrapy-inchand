@@ -1,10 +1,11 @@
 import json
 import re
-from pathlib import Path
-import scrapy
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
-from scrapy.loader import ItemLoader
+
+import scrapy
+
 from inchand.items import ProductItem
 from inchand.log_store import append_jsonl
 
@@ -182,6 +183,156 @@ class InchandSitemapProductsSpider(scrapy.Spider):
             )
         return urls
 
+    def _now_string(self):
+        return datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _extract_next_data(self, response):
+        raw = response.xpath('//script[@id="__NEXT_DATA__"]/text()').get()
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self.logger.warning("Failed to parse __NEXT_DATA__ from %s: %r", response.url, exc)
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _extract_page_props(self, response):
+        payload = self._extract_next_data(response)
+        page_props = payload.get("props", {}).get("pageProps", {})
+        return page_props if isinstance(page_props, dict) else {}
+
+    def _extract_product(self, response):
+        page_props = self._extract_page_props(response)
+        product = page_props.get("product")
+        return product if isinstance(product, dict) else None
+
+    def _extract_dbid_and_uuid(self, product=None):
+        product_id = ""
+        if isinstance(product, dict):
+            product_id = product.get("id", "")
+        product_id = str(product_id).strip() if product_id is not None else ""
+        return {
+            "dbid": f"inchand-{product_id}" if product_id else "",
+            "uuid": product_id,
+        }
+
+    def _extract_price_related(self, product, old_plain):
+        old_inactivity = self._parse_inactivity(old_plain.get("number_of_inactivity"))
+
+        if not isinstance(product, dict):
+            return {
+                "selling_price": "",
+                "rrp_price": "",
+                "discount_percent": "",
+                "is_active": False,
+                "number_of_inactivity": old_inactivity + 1,
+            }
+
+        offer = product.get("offer")
+        if not isinstance(offer, dict):
+            return {
+                "selling_price": "",
+                "rrp_price": "",
+                "discount_percent": "",
+                "is_active": False,
+                "number_of_inactivity": old_inactivity + 1,
+            }
+        
+        availability = offer.get("availability")
+        if not availability:
+            return {
+                "selling_price": "",
+                "rrp_price": "",
+                "discount_percent": "",
+                "is_active": False,
+                "number_of_inactivity": old_inactivity + 1,
+            }
+
+        selling_price = offer.get("price") or ""
+        rrp_price = offer.get("base_price") or selling_price
+
+        discount_percent = offer.get("discount_percent")
+        if discount_percent in (None, ""):
+            discount_percent = ""
+
+        return {
+            "selling_price": selling_price,
+            "rrp_price": rrp_price,
+            "discount_percent": discount_percent,
+            "is_active": True,
+            "number_of_inactivity": 0,
+        }
+    
+    def _extract_brand_value(self, product):
+        brand = product.get("brand") if isinstance(product, dict) else {}
+        if not isinstance(brand, dict):
+            brand = {}
+        return {
+            "title_fa": brand.get("name") or "",
+            "title_en": brand.get("en_name") or "",
+        }
+
+    def _extract_website_value(self):
+        return {"title": "inchand", "url": "www.inchand.com"}
+
+    def _extract_image_url(self, product):
+        image = product.get("image") if isinstance(product, dict) else {}
+        if isinstance(image, dict):
+            return image.get("src") or ""
+        if isinstance(image, list):
+            for entry in image:
+                if isinstance(entry, dict) and entry.get("src"):
+                    return entry.get("src")
+        return ""
+
+    def _make_single_value(self, value):
+        return [value if value is not None else ""]
+
+    def _build_item(self, response, product):
+        prices = self._extract_price_related(product)
+        ids = self._extract_dbid_and_uuid(product)
+        now_str = self._now_string()
+
+        item = ProductItem()
+        item["dbid"] = self._make_single_value(ids["dbid"])
+        item["uuid"] = self._make_single_value(ids["uuid"])
+        item["title_fa"] = self._make_single_value(
+            (product.get("name") if isinstance(product, dict) else "") or ""
+        )
+        item["description"] = self._make_single_value("")
+        item["title_en"] = self._make_single_value(
+            (product.get("en_name") if isinstance(product, dict) else "") or ""
+        )
+        item["supply_category"] = self._make_single_value("")
+        item["category1"] = self._make_single_value("")
+        item["category2"] = self._make_single_value("")
+        item["category3"] = self._make_single_value("")
+        item["category4"] = self._make_single_value("")
+        item["category5"] = self._make_single_value("")
+        item["brand"] = self._make_single_value(self._extract_brand_value(product))
+        item["website"] = self._make_single_value(self._extract_website_value())
+        item["url"] = self._make_single_value(response.url)
+        item["is_active"] = self._make_single_value(prices["is_active"])
+        item["image_url"] = self._make_single_value(self._extract_image_url(product))
+        item["selling_price"] = self._make_single_value(prices["selling_price"])
+        item["rrp_price"] = self._make_single_value(prices["rrp_price"])
+        item["discount_percent"] = self._make_single_value(prices["discount_percent"])
+        item["number_of_inactivity"] = self._make_single_value(
+            prices["number_of_inactivity"]
+        )
+        item["is_fake"] = self._make_single_value(False)
+        item["user_like"] = self._make_single_value(0)
+        item["user_dislike"] = self._make_single_value(0)
+        item["mean_of_prices"] = self._make_single_value("")
+        item["created_date"] = self._make_single_value(now_str)
+        item["updated_date"] = self._make_single_value(now_str)
+        item["variants"] = self._make_single_value("")
+        item["variant_id"] = self._make_single_value("")
+        item["scam_score"] = self._make_single_value("")
+        item["is_vectorized"] = self._make_single_value(False)
+        return item
+
     def log_http_error(self, response):
         append_jsonl(
             self.spider_error_log_file,
@@ -304,153 +455,13 @@ class InchandSitemapProductsSpider(scrapy.Spider):
                 self.products_file,
             )
 
-    def extract_specs(self, response):
-        rows = response.xpath(
-            "//div[contains(@class,'pt-11_')]"
-            "//div[contains(@class,'flex') and contains(@class,'items-center') and contains(@class,'mb-4')]"
-        )
-
-        specs = {}
-        for row in rows:
-            key = row.xpath(
-                "normalize-space(.//div[contains(@class,'w-1/3')][1])"
-            ).get()
-            value = " ".join(
-                t.strip()
-                for t in row.xpath(
-                    ".//div[contains(@class,'w-2/3')][1]//text()"
-                ).getall()
-                if t.strip()
-            )
-            if key and value:
-                specs[key] = value
-        return specs
-
-    def extract_dbid_and_uuid(self, response):
-        persian_to_english = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
-        text = response.xpath(
-            '//div[contains(@class, "text-center") and contains(@class, "text-neutral-400")]/text()[last()]'
-        ).get()
-        if text:
-            product_id = text.strip().translate(persian_to_english)
-            return {
-                "dbid" : f"inchand-{product_id}",
-                "uuid" : product_id
-            }
-        return {
-                "dbid" : "",
-                "uuid" : ""
-            }
-
-    def extract_price_related(self, response):
-        selling_price = response.css(".font-semibold.text-black.text-2xl::text").get()
-        if not selling_price:
-            return {
-                "selling_price" : "",
-                "rrp_price" : "",
-                "discount_percent" : "",
-                "is_active": False,
-                "number_of_inactivity" : 1
-            }
-        
-        discount_percent = response.css(".bg-secondary-color.px-2\\.5.text-black.font-medium.rounded-2xl::text").get()
-        if discount_percent:
-            return {
-                "selling_price" : selling_price,
-                "rrp_price" : response.css(".font-light.text-lg.text-neutral-400.line-through.relative.top-0\\.5.ml-2::text").get(),
-                "discount_percent" : discount_percent,
-                "is_active" : True,
-                "number_of_inactivity" : 0
-            }
-        else:
-            return {
-                "selling_price" : selling_price,
-                "rrp_price" : selling_price,
-                "discount_percent" : "",
-                "is_active" : True,
-                "number_of_inactivity" : 0
-            }
-    
-    def extract_brand(self, response):
-        brand = response.xpath(
-            '//span[contains(@class, "pl-3") and contains(@class, "ml-3") and contains(@class, "border-l") and contains(@class, "border-slate-300")]/text()[last()]'
-        ).get()
-        
-        if brand:
-            return brand.strip()
-        return ""
-    
-    def extract_title_en(self, response):
-        """
-        Extracts the product title. If the text is a Jalali date, returns an empty string.
-        """
-        # Regex pattern for Jalali dates: 4 digits / 2 digits / 2 digits
-        # [۰-۹] matches both Persian and English digits
-        jalali_date_pattern = re.compile(r'^[۰-۹]{4}/[۰-۹]{2}/[۰-۹]{2}$')
-        
-        text = response.css('div.text-neutral-400.text-sm::text').get()
-        
-        if not text:
-            return ""
-            
-        text = text.strip()
-        
-        # If the text matches the Jalali date pattern, return empty string
-        if jalali_date_pattern.match(text):
-            return ""
-            
-        # Otherwise, return the text as the title
-        return text
-
-    def extract_primary_image(self, response):
-        return response.css("img.object-contain.h-full.w-full::attr(src)").get() or ""
-
-        
-
     def parse(self, response):
         if response.status != 200:
             self.log_http_error(response)
             return
         if response.url in self._existing_product_urls:
             return
-        
-        extracted_price_related = self.extract_price_related(response)
-        extracted_dbid_and_uuid = self.extract_dbid_and_uuid(response)
-
-        loader = ItemLoader(item=ProductItem(), response=response)
-        loader.add_value("dbid", extracted_dbid_and_uuid["dbid"])
-        loader.add_value("uuid", extracted_dbid_and_uuid["uuid"])
-        loader.add_css("title_fa", "h1.text-black.text-lg.font-semibold::text")
-        loader.add_value("description", "") #For now it's just empty
-        loader.add_value("title_en", self.extract_title_en(response))
-        loader.add_value("supply_category", "")
-        loader.add_value("category1", "")
-        loader.add_value("category2", "")
-        loader.add_value("category3", "")
-        loader.add_value("category4", "")
-        loader.add_value("category5", "")
-        loader.add_value("brand", self.extract_brand(response))
-        loader.add_css("website", "inchand.com")
-        loader.add_value("url", response.url)
-        loader.add_value("selling_price", extracted_price_related["selling_price"])
-        loader.add_value("rrp_price", extracted_price_related["rrp_price"])
-        loader.add_value("discount_percent", extracted_price_related["discount_percent"])
-        loader.add_value("number_of_inactivity", extracted_price_related["number_of_inactivity"])
-        loader.add_value("is_active", extracted_price_related["is_active"])
-        loader.add_value("is_fake", False)
-        loader.add_value("admin_marked_fake", False)
-        loader.add_value("user_like", 0)
-        loader.add_value("user_dislike", 0)
-        loader.add_value("mean_of_prices", extracted_price_related["selling_price"])
-        loader.add_value("created_date", datetime.now(ZoneInfo("Asia/Tehran")))
-        loader.add_value("updated_date", datetime.now(ZoneInfo("Asia/Tehran")))
-        loader.add_value("variants", "")
-        loader.add_value("variant_id", "")
-        loader.add_value("scam_score", "")
-        loader.add_value("is_vectorized", False)
-        loader.add_value("image_url", self.extract_primary_image(response))
-
-        #loader.add_value("specs", self.extract_specs(response)) For now they just don't extract it
-
-        item = loader.load_item()
-        yield item
+        product = self._extract_product(response)
+        if not product:
+            self.logger.info("No product payload found in __NEXT_DATA__ for %s; marking inactive.", response.url)
+        yield self._build_item(response, product)
