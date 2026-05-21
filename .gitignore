@@ -31,3 +31,5 @@ htmlcov/
 .scrapy/
 inchand/.scrapy/
 # Local exports and temporary data
+temp_files/
+docker-compose.yml

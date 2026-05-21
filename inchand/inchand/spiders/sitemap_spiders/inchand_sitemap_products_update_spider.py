@@ -1,10 +1,11 @@
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import jdatetime
 import scrapy
 
 from inchand.log_store import append_jsonl
@@ -54,9 +55,13 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
         "rrp_price",
         "discount_percent",
         "number_of_inactivity",
+        "mean_of_prices",
+        "variants",
+        "variant_id",
     ]
 
     output_fields = tracked_fields + ["updated_date"]
+    list_like_fields = {"image_url", "variants"}
 
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
@@ -95,11 +100,26 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
     def _now_string(self):
         return datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S")
 
+    def _today_jalali_string(self):
+        return jdatetime.datetime.now().strftime("%Y-%m-%d")
+
     def _unwrap(self, value):
         if isinstance(value, list):
             if not value:
                 return ""
             return self._unwrap(value[0])
+        return value
+
+    def _normalize_field_value(self, field, value):
+        if field in self.list_like_fields:
+            if value in ("", None):
+                return []
+            return value
+        if isinstance(value, list):
+            if not value:
+                return ""
+            if len(value) == 1:
+                return self._normalize_field_value(field, value[0])
         return value
 
     def _extract_next_data(self, response):
@@ -125,51 +145,368 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
         product = page_props.get("product")
         return product if isinstance(product, dict) else None
 
-    def _extract_price_related(self, product, old_plain):
-        old_inactivity = self._parse_inactivity(old_plain.get("number_of_inactivity"))
+    def _extract_offers(self, response, product=None):
+        page_props = self._extract_page_props(response)
+        offers = page_props.get("offers")
+        if isinstance(offers, list) and offers:
+            return offers
+        if isinstance(product, dict):
+            product_offers = product.get("offers")
+            if isinstance(product_offers, list) and product_offers:
+                return product_offers
+            single_offer = product.get("offer")
+            if isinstance(single_offer, dict):
+                return [single_offer]
+        return []
 
-        if not isinstance(product, dict):
-            return {
-                "selling_price": "",
-                "rrp_price": "",
-                "discount_percent": "",
-                "is_active": False,
-                "number_of_inactivity": old_inactivity + 1,
-            }
+    def _is_offer_active(self, offer):
+        if not isinstance(offer, dict):
+            return False
+        availability = offer.get("availability")
+        return availability == 1 or availability == "1"
 
-        offer = product.get("offer")
+    def _build_offer_price_point(self, offer, zero_if_inactive=False):
         if not isinstance(offer, dict):
             return {
-                "selling_price": "",
-                "rrp_price": "",
-                "discount_percent": "",
+                "selling_price": 0 if zero_if_inactive else None,
+                "rrp_price": 0 if zero_if_inactive else None,
+                "discount_percent": 0 if zero_if_inactive else None,
                 "is_active": False,
-                "number_of_inactivity": old_inactivity + 1,
-            }
-        
-        availability = offer.get("availability")
-        if not availability:
-            return {
-                "selling_price": "",
-                "rrp_price": "",
-                "discount_percent": "",
-                "is_active": False,
-                "number_of_inactivity": old_inactivity + 1,
             }
 
-        selling_price = offer.get("price") or ""
-        rrp_price = offer.get("base_price") or selling_price
+        if not self._is_offer_active(offer):
+            return {
+                "selling_price": 0 if zero_if_inactive else None,
+                "rrp_price": 0 if zero_if_inactive else None,
+                "discount_percent": 0 if zero_if_inactive else None,
+                "is_active": False,
+            }
+
+        selling_price = offer.get("price")
+        rrp_price = offer.get("base_price")
+        if rrp_price in ("", None):
+            rrp_price = selling_price
 
         discount_percent = offer.get("discount_percent")
-        if discount_percent in (None, ""):
-            discount_percent = ""
+        if discount_percent in ("", None):
+            discount_percent = 0
 
         return {
             "selling_price": selling_price,
             "rrp_price": rrp_price,
             "discount_percent": discount_percent,
             "is_active": True,
-            "number_of_inactivity": 0,
+        }
+
+    def _parse_jalali_date(self, value):
+        try:
+            year_str, month_str, day_str = str(value).split("-")
+            return int(year_str), int(month_str), int(day_str)
+        except (TypeError, ValueError):
+            return None
+
+    def _sort_jalali_dates(self, dates):
+        return sorted(
+            (date for date in dates if self._parse_jalali_date(date) is not None),
+            key=self._parse_jalali_date,
+        )
+
+    def _is_180_days_or_more_apart(self, older_date, newer_date):
+        older = self._parse_jalali_date(older_date)
+        newer = self._parse_jalali_date(newer_date)
+        if older is None or newer is None:
+            return False
+        older_date_obj = jdatetime.date(*older)
+        newer_date_obj = jdatetime.date(*newer)
+        return (newer_date_obj - older_date_obj).days >= 180
+
+    def _pick_earliest_entry(self, mapping):
+        if not isinstance(mapping, dict) or not mapping:
+            return None, None
+        first_date = self._sort_jalali_dates(mapping.keys())[0]
+        return first_date, mapping.get(first_date)
+
+    def _pick_latest_entry(self, mapping):
+        if not isinstance(mapping, dict) or not mapping:
+            return None, None
+        last_date = self._sort_jalali_dates(mapping.keys())[-1]
+        return last_date, mapping.get(last_date)
+
+    def merge_product_variants(self, offers):
+        merged_variants = []
+        seen_ids = set()
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            offer_id = offer.get("id")
+            if offer_id is None or offer_id in seen_ids:
+                continue
+            seen_ids.add(offer_id)
+            merged_variants.append(offer)
+        return merged_variants
+
+    def _prices_payload_from_offer(self, offer):
+        price_point = self._build_offer_price_point(offer, zero_if_inactive=True)
+        return {
+            "rrp_price": price_point.get("rrp_price"),
+            "selling_price": price_point.get("selling_price"),
+            "discount_percent": price_point.get("discount_percent"),
+        }
+
+    def update_price(self, updating_variant, prices):
+        today_jdate = jdatetime.date.today()
+        today_str = today_jdate.strftime("%Y-%m-%d")
+        current_price_data = {
+            "rrp_price": prices.get("rrp_price"),
+            "selling_price": prices.get("selling_price"),
+            "discount_percent": prices.get("discount_percent"),
+        }
+
+        updating_variant = dict(updating_variant) if isinstance(updating_variant, dict) else {}
+        price_history = updating_variant.get("price_history", {})
+        if not isinstance(price_history, dict):
+            price_history = {}
+
+        start_price = dict(price_history.get("start_price", {}) or {})
+        middle_prices = dict(price_history.get("middle_prices", {}) or {})
+        end_price = dict(price_history.get("end_price", {}) or {})
+
+        if not end_price and start_price:
+            start_date_str = self._sort_jalali_dates(start_price.keys())[0]
+            end_price = {start_date_str: start_price[start_date_str]}
+
+        last_date_str, last_prices = self._pick_latest_entry(end_price)
+        if last_date_str is None or last_prices is None:
+            start_price = {today_str: current_price_data}
+            middle_prices = {}
+            end_price = {today_str: current_price_data}
+        else:
+            price_changed = (
+                current_price_data["rrp_price"] != last_prices.get("rrp_price")
+                or current_price_data["selling_price"] != last_prices.get("selling_price")
+                or current_price_data["discount_percent"] != last_prices.get("discount_percent")
+            )
+
+            if price_changed and last_date_str is not None:
+                middle_prices[last_date_str] = last_prices
+            end_price = {today_str: current_price_data}
+
+            if not start_price:
+                start_price = {today_str: current_price_data}
+
+        start_date_str, start_price_data = self._pick_earliest_entry(start_price)
+        if start_date_str is None or start_price_data is None:
+            start_price = {today_str: current_price_data}
+        else:
+            start_jdate = jdatetime.date(*map(int, start_date_str.split("-")))
+            days_diff = (today_jdate - start_jdate).days
+
+            if days_diff >= 180:
+                last_price = start_price_data
+                if middle_prices:
+                    middle_dates = self._sort_jalali_dates(middle_prices.keys())
+                    suitable_date = None
+                    to_delete = []
+
+                    for date_str in middle_dates:
+                        date_obj = jdatetime.date(*map(int, date_str.split("-")))
+                        gap = (today_jdate - date_obj).days
+
+                        if gap > 180:
+                            if gap < days_diff:
+                                last_price = middle_prices[date_str]
+                            to_delete.append(date_str)
+                        elif gap == 180:
+                            suitable_date = date_str
+                            break
+
+                    for date_str in to_delete:
+                        middle_prices.pop(date_str, None)
+
+                    if suitable_date:
+                        start_price = {suitable_date: middle_prices[suitable_date]}
+                        middle_prices.pop(suitable_date, None)
+                    else:
+                        new_start_date = today_jdate - timedelta(days=180)
+                        start_price = {new_start_date.strftime("%Y-%m-%d"): last_price}
+                else:
+                    new_start_date = today_jdate - timedelta(days=180)
+                    start_price = {new_start_date.strftime("%Y-%m-%d"): last_price}
+
+        price_history = {
+            "start_price": start_price,
+            "middle_prices": middle_prices,
+            "end_price": end_price,
+        }
+
+        price_points = []
+        for section in ("start_price", "middle_prices", "end_price"):
+            for date_str, section_prices in price_history.get(section, {}).items():
+                if not isinstance(section_prices, dict):
+                    continue
+                selling_price = section_prices.get("selling_price")
+                if selling_price:
+                    price_points.append((date_str, selling_price))
+
+        price_points.sort(key=lambda item: item[0])
+
+        if len(price_points) == 0:
+            mean_price = 0
+        elif len(price_points) == 1:
+            mean_price = price_points[0][1]
+        else:
+            total_weighted_price = 0
+            total_days = 0
+
+            for index in range(len(price_points) - 1):
+                current_date_str, current_price = price_points[index]
+                next_date_str, _ = price_points[index + 1]
+
+                current_date = jdatetime.date(*map(int, current_date_str.split("-")))
+                next_date = jdatetime.date(*map(int, next_date_str.split("-")))
+                days = (next_date - current_date).days
+
+                total_weighted_price += current_price * days
+                total_days += days
+
+            last_date_str, last_price = price_points[-1]
+            last_date = jdatetime.date(*map(int, last_date_str.split("-")))
+            days_to_today = (today_jdate - last_date).days
+
+            total_weighted_price += last_price * days_to_today
+            total_days += days_to_today
+            mean_price = total_weighted_price / total_days if total_days > 0 else 0
+
+        updating_variant["mean_of_prices"] = mean_price
+        updating_variant["price_history"] = price_history
+        return updating_variant
+
+    def process_variants(self, merged_variants, existing_variants):
+        today_str = jdatetime.date.today().strftime("%Y-%m-%d")
+        existing_variants = [
+            dict(item) if isinstance(item, dict) else item for item in existing_variants
+        ]
+        ids = [
+            item.get("id")
+            for item in existing_variants
+            if isinstance(item, dict) and item.get("id") is not None
+        ]
+
+        for variant in merged_variants:
+            variant_id = variant.get("id")
+            if variant_id is None:
+                continue
+
+            prices = self._prices_payload_from_offer(variant)
+
+            if variant_id in ids:
+                ids.remove(variant_id)
+                updating_variant = next(
+                    (
+                        existing_variants.pop(index)
+                        for index, item in enumerate(existing_variants)
+                        if isinstance(item, dict) and item.get("id") == variant_id
+                    ),
+                    None,
+                )
+                updating_variant = self.update_price(updating_variant, prices)
+                existing_variants.append(updating_variant)
+            else:
+                current_price_data = {
+                    "rrp_price": prices["rrp_price"],
+                    "selling_price": prices["selling_price"],
+                    "discount_percent": prices["discount_percent"],
+                }
+                price_history = {
+                    "start_price": {today_str: current_price_data},
+                    "middle_prices": {},
+                    "end_price": {today_str: current_price_data},
+                }
+                existing_variants.append(
+                    {
+                        "id": variant_id,
+                        "price_history": price_history,
+                        "mean_of_prices": current_price_data["selling_price"] or 0,
+                    }
+                )
+
+        for variant_id in ids:
+            updating_variant = next(
+                (
+                    existing_variants.pop(index)
+                    for index, item in enumerate(existing_variants)
+                    if isinstance(item, dict) and item.get("id") == variant_id
+                ),
+                None,
+            )
+            prices = {
+                "rrp_price": 0,
+                "selling_price": 0,
+                "discount_percent": 0,
+            }
+            updating_variant = self.update_price(updating_variant, prices)
+            existing_variants.append(updating_variant)
+
+        return existing_variants
+
+    def _update_variants_and_prices(self, response, product, old_plain):
+        current_offers = self.merge_product_variants(self._extract_offers(response, product))
+        old_variants = old_plain.get("variants")
+        if not isinstance(old_variants, list):
+            old_variants = []
+
+        updated_variants = self.process_variants(current_offers, old_variants)
+        variants_by_id = {
+            variant.get("id"): variant
+            for variant in updated_variants
+            if isinstance(variant, dict) and variant.get("id") is not None
+        }
+
+        active_offers = [offer for offer in current_offers if self._is_offer_active(offer)]
+        old_inactivity = self._parse_inactivity(old_plain.get("number_of_inactivity"))
+
+        selected_offer = None
+        current_offer = product.get("offer") if isinstance(product, dict) else None
+        if self._is_offer_active(current_offer):
+            selected_offer = current_offer
+        elif active_offers:
+            selected_offer = active_offers[0]
+
+        if selected_offer is not None:
+            selected_variant_id = selected_offer.get("id")
+            selected_price_point = self._build_offer_price_point(selected_offer)
+            selected_variant = variants_by_id.get(selected_variant_id)
+            mean_of_prices = (
+                selected_variant.get("mean_of_prices")
+                if isinstance(selected_variant, dict)
+                else selected_price_point.get("selling_price")
+            )
+            return {
+                "variants": updated_variants,
+                "variant_id": selected_variant_id,
+                "mean_of_prices": mean_of_prices,
+                "is_active": True,
+                "selling_price": selected_price_point.get("selling_price"),
+                "rrp_price": selected_price_point.get("rrp_price"),
+                "discount_percent": selected_price_point.get("discount_percent"),
+                "number_of_inactivity": 0,
+            }
+
+        fallback_variant_id = old_plain.get("variant_id")
+        fallback_mean = old_plain.get("mean_of_prices")
+        fallback_variant = variants_by_id.get(fallback_variant_id)
+        if isinstance(fallback_variant, dict):
+            fallback_mean = fallback_variant.get("mean_of_prices", fallback_mean)
+
+        return {
+            "variants": updated_variants,
+            "variant_id": fallback_variant_id,
+            "mean_of_prices": fallback_mean,
+            "is_active": False,
+            "selling_price": None,
+            "rrp_price": None,
+            "discount_percent": 0,
+            "number_of_inactivity": old_inactivity + 1,
         }
 
     def _extract_url_from_record(self, record):
@@ -186,16 +523,24 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
 
         out = {}
         for field in keys:
-            out[field] = [plain_record.get(field, "")]
+            if field in plain_record:
+                out[field] = plain_record.get(field)
+            elif field in self.list_like_fields:
+                out[field] = []
+            else:
+                out[field] = ""
         return out
 
     def _line_to_plain(self, line_record):
         plain = {}
         if isinstance(line_record, dict):
             for field, value in line_record.items():
-                plain[field] = self._unwrap(value)
+                plain[field] = self._normalize_field_value(field, value)
         for field in self.output_fields:
-            plain.setdefault(field, "")
+            if field in self.list_like_fields:
+                plain.setdefault(field, [])
+            else:
+                plain.setdefault(field, "")
         return plain
 
     def _normalize_digits_if_needed(self, text):
@@ -319,15 +664,18 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
 
     def _build_plain_record(self, response, old_plain):
         product = self._extract_product(response)
-        extracted_price_related = self._extract_price_related(product, old_plain)
+        updated_variant_state = self._update_variants_and_prices(response, product, old_plain)
         now_str = self._now_string()
 
         rec = dict(old_plain)
-        rec["is_active"] = extracted_price_related["is_active"]
-        rec["selling_price"] = extracted_price_related["selling_price"]
-        rec["rrp_price"] = extracted_price_related["rrp_price"]
-        rec["discount_percent"] = extracted_price_related["discount_percent"]
-        rec["number_of_inactivity"] = extracted_price_related["number_of_inactivity"]
+        rec["is_active"] = updated_variant_state["is_active"]
+        rec["selling_price"] = updated_variant_state["selling_price"]
+        rec["rrp_price"] = updated_variant_state["rrp_price"]
+        rec["discount_percent"] = updated_variant_state["discount_percent"]
+        rec["number_of_inactivity"] = updated_variant_state["number_of_inactivity"]
+        rec["mean_of_prices"] = updated_variant_state["mean_of_prices"]
+        rec["variants"] = updated_variant_state["variants"]
+        rec["variant_id"] = updated_variant_state["variant_id"]
         rec["updated_date"] = now_str
         return rec
 

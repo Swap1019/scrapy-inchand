@@ -1,8 +1,8 @@
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import jdatetime
 
 import scrapy
 
@@ -13,7 +13,7 @@ from inchand.log_store import append_jsonl
 class InchandSitemapProductsSpider(scrapy.Spider):
     name = "inchand_sitemap_products"
     allowed_domains = ["inchand.com"]
-    default_urls_file = "data/sitemap-extracted-data/my_shop.json"
+    default_urls_file = "data/sitemap-extracted-data/my_shops.json"
     default_products_file = "data/sitemap-extracted-data/my_products.jsonl"
 
     @classmethod
@@ -207,6 +207,13 @@ class InchandSitemapProductsSpider(scrapy.Spider):
         product = page_props.get("product")
         return product if isinstance(product, dict) else None
 
+    def _extract_offers(self, response, product=None):
+        page_props = self._extract_page_props(response)
+        offers = page_props.get("offers")
+        if isinstance(offers, list) and offers:
+            return offers
+        return []
+
     def _extract_dbid_and_uuid(self, product=None):
         product_id = ""
         if isinstance(product, dict):
@@ -217,51 +224,68 @@ class InchandSitemapProductsSpider(scrapy.Spider):
             "uuid": product_id,
         }
 
-    def _extract_price_related(self, product, old_plain):
-        old_inactivity = self._parse_inactivity(old_plain.get("number_of_inactivity"))
-
-        if not isinstance(product, dict):
-            return {
-                "selling_price": "",
-                "rrp_price": "",
-                "discount_percent": "",
-                "is_active": False,
-                "number_of_inactivity": old_inactivity + 1,
-            }
-
-        offer = product.get("offer")
+    def _build_offer_price_point(self, offer):
         if not isinstance(offer, dict):
             return {
-                "selling_price": "",
-                "rrp_price": "",
-                "discount_percent": "",
+                "selling_price": None,
+                "rrp_price": None,
+                "discount_percent": None,
                 "is_active": False,
-                "number_of_inactivity": old_inactivity + 1,
             }
-        
+
         availability = offer.get("availability")
-        if not availability:
+        is_active = availability == 1
+        discount_percent = offer.get("discount_percent")
+        if discount_percent in ("", None):
+            discount_percent = None
+
+        if not is_active:
             return {
-                "selling_price": "",
-                "rrp_price": "",
-                "discount_percent": "",
+                "selling_price": None,
+                "rrp_price": None,
+                "discount_percent": discount_percent,
                 "is_active": False,
-                "number_of_inactivity": old_inactivity + 1,
             }
 
-        selling_price = offer.get("price") or ""
-        rrp_price = offer.get("base_price") or selling_price
-
-        discount_percent = offer.get("discount_percent")
-        if discount_percent in (None, ""):
-            discount_percent = ""
+        selling_price = offer.get("price")
+        rrp_price = offer.get("base_price")
+        if rrp_price in ("", None):
+            rrp_price = selling_price
 
         return {
             "selling_price": selling_price,
             "rrp_price": rrp_price,
             "discount_percent": discount_percent,
             "is_active": True,
-            "number_of_inactivity": 0,
+        }
+
+    def _extract_price_related(self, product):
+        if not isinstance(product, dict):
+            return {
+                "selling_price": None,
+                "rrp_price": None,
+                "discount_percent": None,
+                "is_active": False,
+                "number_of_inactivity": 1,
+            }
+
+        offer = product.get("offer")
+        if not isinstance(offer, dict):
+            return {
+                "selling_price": None,
+                "rrp_price": None,
+                "discount_percent": None,
+                "is_active": False,
+                "number_of_inactivity": 1,
+            }
+        price_point = self._build_offer_price_point(offer)
+
+        return {
+            "selling_price": price_point["selling_price"],
+            "rrp_price": price_point["rrp_price"],
+            "discount_percent": price_point["discount_percent"],
+            "is_active": price_point["is_active"],
+            "number_of_inactivity": 0 if price_point["is_active"] else 1,
         }
     
     def _extract_brand_value(self, product):
@@ -286,51 +310,96 @@ class InchandSitemapProductsSpider(scrapy.Spider):
                     return entry.get("src")
         return ""
 
-    def _make_single_value(self, value):
-        return [value if value is not None else ""]
+    def _extract_variants(self, response, product):
+        today = jdatetime.datetime.today().strftime("%Y-%m-%d")
+        if not isinstance(product, dict):
+            return [], None, None
+
+        offers = self._extract_offers(response, product)
+
+        variants = []
+        seen_ids = set()
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            offer_id = offer.get("id")
+            if offer_id in seen_ids:
+                continue
+            seen_ids.add(offer_id)
+
+            price_point = self._build_offer_price_point(offer)
+            history_point = {
+                "selling_price": price_point["selling_price"],
+                "discount_percent": price_point["discount_percent"],
+                "rrp_price": price_point["rrp_price"],
+            }
+            mean_of_prices = price_point["selling_price"]
+
+            variants.append(
+                {
+                    "mean_of_prices": mean_of_prices,
+                    "id": offer_id,
+                    "price_history": {
+                        "end_price": {today: history_point},
+                        "start_price": {today: history_point},
+                        "middle_prices": {},
+                    },
+                }
+            )
+
+        current_offer = product.get("offer")
+        current_variant_id = None
+        current_mean = None
+        if isinstance(current_offer, dict):
+            current_variant_id = current_offer.get("id")
+            for variant in variants:
+                if variant.get("id") == current_variant_id:
+                    current_mean = variant.get("mean_of_prices")
+                    break
+        if current_variant_id is None and variants:
+            current_variant_id = variants[0].get("id")
+            current_mean = variants[0].get("mean_of_prices")
+
+        return variants, current_variant_id, current_mean
 
     def _build_item(self, response, product):
         prices = self._extract_price_related(product)
         ids = self._extract_dbid_and_uuid(product)
         now_str = self._now_string()
+        variants, variant_id, mean_of_prices = self._extract_variants(response, product)
+        image_url = self._extract_image_url(product)
 
         item = ProductItem()
-        item["dbid"] = self._make_single_value(ids["dbid"])
-        item["uuid"] = self._make_single_value(ids["uuid"])
-        item["title_fa"] = self._make_single_value(
-            (product.get("name") if isinstance(product, dict) else "") or ""
-        )
-        item["description"] = self._make_single_value("")
-        item["title_en"] = self._make_single_value(
-            (product.get("en_name") if isinstance(product, dict) else "") or ""
-        )
-        item["supply_category"] = self._make_single_value("")
-        item["category1"] = self._make_single_value("")
-        item["category2"] = self._make_single_value("")
-        item["category3"] = self._make_single_value("")
-        item["category4"] = self._make_single_value("")
-        item["category5"] = self._make_single_value("")
-        item["brand"] = self._make_single_value(self._extract_brand_value(product))
-        item["website"] = self._make_single_value(self._extract_website_value())
-        item["url"] = self._make_single_value(response.url)
-        item["is_active"] = self._make_single_value(prices["is_active"])
-        item["image_url"] = self._make_single_value(self._extract_image_url(product))
-        item["selling_price"] = self._make_single_value(prices["selling_price"])
-        item["rrp_price"] = self._make_single_value(prices["rrp_price"])
-        item["discount_percent"] = self._make_single_value(prices["discount_percent"])
-        item["number_of_inactivity"] = self._make_single_value(
-            prices["number_of_inactivity"]
-        )
-        item["is_fake"] = self._make_single_value(False)
-        item["user_like"] = self._make_single_value(0)
-        item["user_dislike"] = self._make_single_value(0)
-        item["mean_of_prices"] = self._make_single_value("")
-        item["created_date"] = self._make_single_value(now_str)
-        item["updated_date"] = self._make_single_value(now_str)
-        item["variants"] = self._make_single_value("")
-        item["variant_id"] = self._make_single_value("")
-        item["scam_score"] = self._make_single_value("")
-        item["is_vectorized"] = self._make_single_value(False)
+        item["dbid"] = ids["dbid"]
+        item["uuid"] = ids["uuid"]
+        item["title_fa"] = (product.get("name") if isinstance(product, dict) else "") or ""
+        item["description"] = ""
+        item["title_en"] = (product.get("en_name") if isinstance(product, dict) else "") or ""
+        item["supply_category"] = ""
+        item["category1"] = ""
+        item["category2"] = ""
+        item["category3"] = ""
+        item["category4"] = ""
+        item["category5"] = ""
+        item["brand"] = self._extract_brand_value(product)
+        item["website"] = self._extract_website_value()
+        item["url"] = response.url
+        item["is_active"] = prices["is_active"]
+        item["image_url"] = [image_url] if image_url else []
+        item["selling_price"] = prices["selling_price"]
+        item["rrp_price"] = prices["rrp_price"]
+        item["discount_percent"] = prices["discount_percent"]
+        item["number_of_inactivity"] = prices["number_of_inactivity"]
+        item["is_fake"] = False
+        item["user_like"] = 0
+        item["user_dislike"] = 0
+        item["mean_of_prices"] = mean_of_prices
+        item["created_date"] = now_str
+        item["updated_date"] = now_str
+        item["variants"] = variants
+        item["variant_id"] = variant_id
+        item["scam_score"] = ""
+        item["is_vectorized"] = False
         return item
 
     def log_http_error(self, response):
