@@ -9,7 +9,10 @@ SITEMAP_SHOP_FILE="${SITEMAP_SHOP_FILE:-data/sitemap-extracted-data/my_shops.jso
 SITEMAP_CATEGORY_FILE="${SITEMAP_CATEGORY_FILE:-data/sitemap-extracted-data/my_categories.json}"
 SITEMAP_PRODUCTS_FILE="${SITEMAP_PRODUCTS_FILE:-data/sitemap-extracted-data/my_products.jsonl}"
 SITEMAP_OUTPUT_MODE="${SITEMAP_OUTPUT_MODE:-resume}"
+USE_JSON_STORAGE="${USE_JSON_STORAGE:-false}"
 LOG_DIR="${LOG_DIR:-data/logs}"
+
+export USE_JSON_STORAGE
 
 usage() {
   cat <<'USAGE'
@@ -32,7 +35,7 @@ Notes:
   - By default it uses ./.venv/bin/scrapy if available.
   - Output paths can be overridden with environment variables:
     SITEMAP_SHOP_FILE, SITEMAP_CATEGORY_FILE, SITEMAP_PRODUCTS_FILE,
-    SITEMAP_OUTPUT_MODE (resume|overwrite), LOG_DIR
+    SITEMAP_OUTPUT_MODE (resume|overwrite), USE_JSON_STORAGE (true|false), LOG_DIR
 USAGE
 }
 
@@ -70,6 +73,13 @@ run_sitemap_products() {
   local output_file="$SITEMAP_PRODUCTS_FILE"
   local mode="$SITEMAP_OUTPUT_MODE"
 
+  if [[ "$USE_JSON_STORAGE" != "true" ]]; then
+    run_scrapy crawl inchand_sitemap_products \
+      -a urls_file="$SITEMAP_SHOP_FILE" \
+      -a use_json_storage=false
+    return
+  fi
+
   if [[ "$mode" == "resume" ]]; then
     if [[ "$output_file" != *.jsonl ]]; then
       echo "Error: resume mode requires a .jsonl output file. Current: $output_file" >&2
@@ -79,6 +89,7 @@ run_sitemap_products() {
     run_scrapy crawl inchand_sitemap_products \
       -a urls_file="$SITEMAP_SHOP_FILE" \
       -a products_file="$output_file" \
+      -a use_json_storage=true \
       -o "$output_file"
     return
   fi
@@ -86,12 +97,20 @@ run_sitemap_products() {
   run_scrapy crawl inchand_sitemap_products \
     -a urls_file="$SITEMAP_SHOP_FILE" \
     -a products_file="$output_file" \
+    -a use_json_storage=true \
     -O "$output_file"
 }
 
 run_sitemap_update() {
+  if [[ "$USE_JSON_STORAGE" == "true" ]]; then
+    run_scrapy crawl inchand_sitemap_products_update \
+      -a products_file="$SITEMAP_PRODUCTS_FILE" \
+      -a use_json_storage=true
+    return
+  fi
+
   run_scrapy crawl inchand_sitemap_products_update \
-    -a products_file="$SITEMAP_PRODUCTS_FILE"
+    -a use_json_storage=false
 }
 
 case "${1:-help}" in
