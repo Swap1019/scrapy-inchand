@@ -1,3 +1,13 @@
+import os
+
+
+def _env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Scrapy settings for inchand project
 
 BOT_NAME = "inchand"
@@ -32,24 +42,33 @@ DOWNLOADER_MIDDLEWARES = {
     'scrapy_user_agents.middlewares.RandomUserAgentMiddleware': 400,
 }
 
-# Redis connection (disabled for now)
-# REDIS_HOST = "localhost"
-# REDIS_PORT = 6379
-# ITEM_PIPELINES = {
-#     "inchand.pipelines.RedisStorePipeline": 100,
-# }
+USE_JSON_STORAGE = _env_bool("USE_JSON_STORAGE", False)
 
-# scrapy-redis core settings (disabled for now)
-# SCHEDULER = "scrapy_redis.scheduler.Scheduler"
-# DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "inchand:product:")
+REDIS_BATCH_KEY = os.getenv("REDIS_BATCH_KEY", "inchand:product_urls")
 
-# Keep queue after shutdown (disabled for now)
-# SCHEDULER_PERSIST = True
+ELASTICSEARCH_URL = os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
+ELASTICSEARCH_INDEX = os.getenv("ELASTICSEARCH_INDEX", "inchand-products")
+ELASTICSEARCH_TIMEOUT = float(os.getenv("ELASTICSEARCH_TIMEOUT", "15"))
+
+ENABLE_REDIS_PIPELINE = _env_bool("ENABLE_REDIS_PIPELINE", True)
+ENABLE_ELASTICSEARCH_PIPELINE = _env_bool("ENABLE_ELASTICSEARCH_PIPELINE", True)
+USE_REDIS_SCHEDULER = _env_bool("USE_REDIS_SCHEDULER", False)
+
+ITEM_PIPELINES = {}
+if ENABLE_ELASTICSEARCH_PIPELINE:
+    ITEM_PIPELINES["inchand.pipelines.ProductElasticsearchPipeline"] = 200
+if ENABLE_REDIS_PIPELINE:
+    ITEM_PIPELINES["inchand.pipelines.ProductRedisPipeline"] = 300
+
+if USE_REDIS_SCHEDULER:
+    SCHEDULER = "scrapy_redis.scheduler.Scheduler"
+    DUPEFILTER_CLASS = "scrapy_redis.dupefilter.RFPDupeFilter"
+    SCHEDULER_PERSIST = True
+    SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.PriorityQueue"
 
 DUPEFILTER_DEBUG = True
-
-# prevent memory blowup (disabled for now)
-# SCHEDULER_QUEUE_CLASS = "scrapy_redis.queue.SpiderQueue"
 
 AUTOTHROTTLE_ENABLED = True
 
