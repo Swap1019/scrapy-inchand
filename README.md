@@ -52,6 +52,8 @@ Primary storage mode:
 
 - Default mode uses Elasticsearch as the main product store and Redis as the updater cache.
 - JSON storage is optional and enabled only with `USE_JSON_STORAGE=true`.
+- Sitemap URL records are also stored in Elasticsearch and Redis.
+- If `USE_REDIS_START_URLS=true`, shop URLs discovered by `inchand_sitemap_urls` are pushed into the Redis start-URL queue for `inchand_sitemap_products`.
 
 Step-by-step commands:
 
@@ -137,6 +139,9 @@ USE_JSON_STORAGE=true ../.venv/bin/scrapy crawl inchand_sitemap_products_update 
 - Follows sitemap index entries internally.
 - Extracts and saves page URLs into:
 `my_shop.json`, `my_categories.json`.
+- Upserts shop/category URL records into Elasticsearch.
+- Caches shop/category URL records in Redis.
+- If `USE_REDIS_START_URLS=true`, enqueues shop URLs into `REDIS_PRODUCTS_START_URLS_KEY`.
 
 2. `inchand_sitemap_products`
 - Reads shop URLs from `my_shop.json`.
