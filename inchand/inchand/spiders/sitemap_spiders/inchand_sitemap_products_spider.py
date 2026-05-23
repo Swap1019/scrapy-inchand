@@ -8,14 +8,11 @@ import scrapy
 
 from inchand.items import ProductItem
 from inchand.log_store import append_jsonl
-from inchand.redis_spider import OptionalRedisSpider
-from inchand.storage import ElasticsearchProductStore, parse_bool
 
 
-class InchandSitemapProductsSpider(OptionalRedisSpider):
+class InchandSitemapProductsSpider(scrapy.Spider):
     name = "inchand_sitemap_products"
     allowed_domains = ["inchand.com"]
-    redis_queue_key_setting = "REDIS_PRODUCTS_START_URLS_KEY"
     default_urls_file = "data/sitemap-extracted-data/my_shops.json"
     default_products_file = "data/sitemap-extracted-data/my_products.jsonl"
 
@@ -24,15 +21,6 @@ class InchandSitemapProductsSpider(OptionalRedisSpider):
         spider = super().from_crawler(crawler, *args, **kwargs)
         spider.spider_error_log_file = crawler.settings.get(
             "SPIDER_ERROR_LOG_FILE", "data/logs/spider_errors.jsonl"
-        )
-        spider.use_json_storage = parse_bool(
-            kwargs.get("use_json_storage"),
-            crawler.settings.getbool("USE_JSON_STORAGE"),
-        )
-        spider.elasticsearch_store = ElasticsearchProductStore(
-            base_url=crawler.settings.get("ELASTICSEARCH_URL"),
-            index_name=crawler.settings.get("ELASTICSEARCH_INDEX"),
-            timeout=crawler.settings.getfloat("ELASTICSEARCH_TIMEOUT", 15.0),
         )
         return spider
 
@@ -137,32 +125,6 @@ class InchandSitemapProductsSpider(OptionalRedisSpider):
         return [], False
 
     def _load_existing_product_urls(self):
-        if not getattr(self, "use_json_storage", False):
-            return self._load_existing_product_urls_from_elasticsearch()
-        return self._load_existing_product_urls_from_json()
-
-    def _load_existing_product_urls_from_elasticsearch(self):
-        urls = set()
-        try:
-            for record in self.elasticsearch_store.iter_documents():
-                url_value = self._extract_url_value(record)
-                if url_value:
-                    urls.add(url_value)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed reading existing products from Elasticsearch: %r. Continuing without resume-skip.",
-                exc,
-            )
-            return set()
-
-        if urls:
-            self.logger.info(
-                "Loaded %d existing product URLs from Elasticsearch for restart-safe skipping.",
-                len(urls),
-            )
-        return urls
-
-    def _load_existing_product_urls_from_json(self):
         path = self._resolve_products_path()
         if not path.exists():
             return set()
@@ -535,7 +497,7 @@ class InchandSitemapProductsSpider(OptionalRedisSpider):
 
         return normalize_urls(urls)
 
-    def local_start_requests(self):
+    def start_requests(self):
         if not self._existing_product_urls:
             self._existing_product_urls = self._load_existing_product_urls()
         urls = self._load_shop_urls()

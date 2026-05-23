@@ -9,15 +9,8 @@ import jdatetime
 import scrapy
 
 from inchand.log_store import append_jsonl
-from inchand.redis_spider import OptionalRedisSpider
-from inchand.storage import (
-    ElasticsearchProductStore,
-    RedisProductStore,
-    parse_bool,
-)
 
-
-class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
+class InchandSitemapProductsUpdateSpider(scrapy.Spider):
     name = "inchand_sitemap_products_update"
     allowed_domains = ["inchand.com"]
     default_products_file = "data/sitemap-extracted-data/my_products.jsonl"
@@ -75,19 +68,6 @@ class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
         spider.spider_error_log_file = crawler.settings.get(
             "SPIDER_ERROR_LOG_FILE", "data/logs/spider_errors.jsonl"
         )
-        spider.use_json_storage = parse_bool(
-            kwargs.get("use_json_storage"),
-            crawler.settings.getbool("USE_JSON_STORAGE"),
-        )
-        spider.elasticsearch_store = ElasticsearchProductStore(
-            base_url=crawler.settings.get("ELASTICSEARCH_URL"),
-            index_name=crawler.settings.get("ELASTICSEARCH_INDEX"),
-            timeout=crawler.settings.getfloat("ELASTICSEARCH_TIMEOUT", 15.0),
-        )
-        spider.redis_store = RedisProductStore(
-            redis_url=crawler.settings.get("REDIS_URL"),
-            key_prefix=crawler.settings.get("REDIS_KEY_PREFIX"),
-        )
         return spider
 
     def __init__(self, *args, **kwargs):
@@ -100,7 +80,7 @@ class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
         self._seen_request_urls = set()
         self._updated_count = 0
         self._unchanged_count = 0
-        self._records_loaded = False
+        self._load_existing_records()
 
     def _resolve_products_path(self):
         configured = Path(self.products_file)
@@ -609,43 +589,6 @@ class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
         return (0 if has_discount else 1, -discount, inactivity)
 
     def _load_existing_records(self):
-        if self._records_loaded:
-            return
-        if getattr(self, "use_json_storage", False):
-            self._load_existing_records_from_json()
-        else:
-            self._load_existing_records_from_elasticsearch()
-        self._records_loaded = True
-
-    def _cache_record(self, record):
-        url = self._extract_url_from_record(record)
-        if not url:
-            return
-        try:
-            self.redis_store.set(url, record)
-        except Exception as exc:
-            self.logger.warning("Failed caching product in Redis for %s: %r", url, exc)
-
-    def _load_existing_records_from_elasticsearch(self):
-        count = 0
-        try:
-            for rec in self.elasticsearch_store.iter_documents():
-                url = self._extract_url_from_record(rec)
-                if not url:
-                    self._orphan_records.append(rec)
-                    continue
-                if url not in self._records_by_url:
-                    self._ordered_urls.append(url)
-                self._records_by_url[url] = rec
-                self._cache_record(rec)
-                count += 1
-        except Exception as exc:
-            self.logger.warning("Failed loading product records from Elasticsearch: %r", exc)
-            return
-
-        self.logger.info("Loaded %d product records from Elasticsearch", count)
-
-    def _load_existing_records_from_json(self):
         path = self._resolve_products_path()
         if not path.exists():
             self.logger.warning("Products file not found: %s", path)
@@ -668,45 +611,12 @@ class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
             if url not in self._records_by_url:
                 self._ordered_urls.append(url)
             self._records_by_url[url] = rec
-            self._cache_record(rec)
 
         self.logger.info(
             "Loaded %d product records from %s",
             len(self._records_by_url),
             path,
         )
-
-    def _get_cached_record(self, url):
-        try:
-            record = self.redis_store.get(url)
-        except Exception as exc:
-            self.logger.warning("Failed reading Redis cache for %s: %r", url, exc)
-            record = None
-
-        if isinstance(record, dict):
-            return record
-
-        record = self._records_by_url.get(url)
-        if isinstance(record, dict):
-            self._cache_record(record)
-            return record
-
-        if not getattr(self, "use_json_storage", False):
-            try:
-                record = self.elasticsearch_store.get(url)
-            except Exception as exc:
-                self.logger.warning(
-                    "Failed reading Elasticsearch product for %s: %r", url, exc
-                )
-                return None
-            if isinstance(record, dict):
-                self._records_by_url[url] = record
-                if url not in self._ordered_urls:
-                    self._ordered_urls.append(url)
-                self._cache_record(record)
-                return record
-
-        return None
 
     def _request_priority(self, url):
         line_rec = self._records_by_url.get(url, {})
@@ -742,11 +652,9 @@ class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
             },
         )
 
-    def local_start_requests(self):
-        self._load_existing_records()
+    def start_requests(self):
         if not self._ordered_urls:
-            source_label = self.products_file if getattr(self, "use_json_storage", False) else "Elasticsearch"
-            self.logger.warning("No URLs loaded from %s", source_label)
+            self.logger.warning("No URLs loaded from %s", self.products_file)
             return
 
         prioritized_urls = sorted(self._ordered_urls, key=self._priority_sort_key)
@@ -791,7 +699,7 @@ class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
             return
 
         url = response.url
-        old_line = self._get_cached_record(url)
+        old_line = self._records_by_url.get(url)
         if not old_line:
             self.logger.warning("Skipping URL not found in existing products file: %s", url)
             return
@@ -804,21 +712,11 @@ class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
             new_plain["updated_date"] = self._now_string()
             updated_line = self._to_line_record(new_plain, template_line=old_line)
             self._records_by_url[url] = updated_line
-            self._cache_record(updated_line)
             self._updated_count += 1
-            yield updated_line
         else:
             self._unchanged_count += 1
 
     def closed(self, reason):
-        if not getattr(self, "use_json_storage", False):
-            self.logger.info(
-                "Update finished. updated=%d unchanged=%d source=Elasticsearch",
-                self._updated_count,
-                self._unchanged_count,
-            )
-            return
-
         changed = self._updated_count
         if changed == 0:
             self.logger.info(
