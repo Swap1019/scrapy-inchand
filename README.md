@@ -48,13 +48,6 @@ Common commands:
 ./scripts/run_spiders.sh logs
 ```
 
-Primary storage mode:
-
-- Default mode uses Elasticsearch as the main product store and Redis as the updater cache.
-- JSON storage is optional and enabled only with `USE_JSON_STORAGE=true`.
-- Sitemap URL records are also stored in Elasticsearch and Redis.
-- If `USE_REDIS_START_URLS=true`, shop URLs discovered by `inchand_sitemap_urls` are pushed into the Redis start-URL queue for `inchand_sitemap_products`.
-
 Step-by-step commands:
 
 ```bash
@@ -63,24 +56,11 @@ Step-by-step commands:
 ./scripts/run_spiders.sh sitemap-update
 ```
 
-### Storage Modes (`run_spiders.sh`)
-
-Default mode:
-
-- `inchand_sitemap_products` upserts products into Elasticsearch.
-- `inchand_sitemap_products_update` loads existing products from Elasticsearch, caches them in Redis, compares fetched data against the Redis copy, then upserts changed records back into Elasticsearch.
-- If `USE_REDIS_SCHEDULER=true`, Scrapy uses `scrapy-redis`'s priority queue scheduler and still respects `Request.priority`.
-
-Optional JSON mode:
-
-- Set `USE_JSON_STORAGE=true` to keep writing and updating `my_products.jsonl`.
-- JSON mode can run alongside Elasticsearch/Redis; it is a side output, not the primary store.
-
 ### Resume Mode Design (`run_spiders.sh`)
 
 `sitemap-products` defaults to `SITEMAP_OUTPUT_MODE=resume`.
 
-When `USE_JSON_STORAGE=true`, primary JSON output is JSONL (`my_products.jsonl`), and resume mode appends directly:
+Primary output is JSONL (`my_products.jsonl`), and resume mode appends directly:
 
 1. Spider loads already-seen URLs from `products_file`.
 2. Feed export appends new items to the same `.jsonl` file with `-o`.
@@ -109,24 +89,14 @@ This mode reads URLs from sitemap XML files.
 
 ```bash
 ../.venv/bin/scrapy crawl inchand_sitemap_products \
-  -a urls_file=data/sitemap-extracted-data/my_shop.json
+  -a urls_file=data/sitemap-extracted-data/my_shop.json \
+  -o data/sitemap-extracted-data/my_products.jsonl
 ```
 
 3. Update existing product records by checking field changes:
 
 ```bash
-../.venv/bin/scrapy crawl inchand_sitemap_products_update
-```
-
-JSON-enabled equivalents:
-
-```bash
-USE_JSON_STORAGE=true ../.venv/bin/scrapy crawl inchand_sitemap_products \
-  -a urls_file=data/sitemap-extracted-data/my_shop.json \
-  -a products_file=data/sitemap-extracted-data/my_products.jsonl \
-  -o data/sitemap-extracted-data/my_products.jsonl
-
-USE_JSON_STORAGE=true ../.venv/bin/scrapy crawl inchand_sitemap_products_update \
+../.venv/bin/scrapy crawl inchand_sitemap_products_update \
   -a products_file=data/sitemap-extracted-data/my_products.jsonl
 ```
 
@@ -139,22 +109,16 @@ USE_JSON_STORAGE=true ../.venv/bin/scrapy crawl inchand_sitemap_products_update 
 - Follows sitemap index entries internally.
 - Extracts and saves page URLs into:
 `my_shop.json`, `my_categories.json`.
-- Upserts shop/category URL records into Elasticsearch.
-- Caches shop/category URL records in Redis.
-- If `USE_REDIS_START_URLS=true`, enqueues shop URLs into `REDIS_PRODUCTS_START_URLS_KEY`.
 
 2. `inchand_sitemap_products`
 - Reads shop URLs from `my_shop.json`.
 - Visits only product pages and extracts product data.
-- Upserts product documents into Elasticsearch through the pipeline.
-- Optionally writes product dataset to `my_products.jsonl` when `USE_JSON_STORAGE=true`.
+- Writes product dataset to `my_products.jsonl`.
 
 3. `inchand_sitemap_products_update`
-- Reads existing products from Elasticsearch by default.
-- Caches those products in Redis and uses the cached copy for comparison.
+- Reads product URLs from `my_products.jsonl`.
 - Re-fetches each product page and compares tracked fields.
-- Upserts only changed records back into Elasticsearch and refreshes the Redis cache.
-- Rewrites `my_products.jsonl` atomically only when `USE_JSON_STORAGE=true`.
+- Rewrites `my_products.jsonl` atomically when changes exist.
 
 ### Updater Spider Rules
 
@@ -198,10 +162,9 @@ Activity/inactivity behavior:
 
 File behavior:
 
-- Default source of truth is Elasticsearch
-- Redis stores cached product records for updater comparison
-- Optional JSON input/output is `data/sitemap-extracted-data/my_products.jsonl`
-- JSONL rewrite is atomic (`.tmp` + replace) when `USE_JSON_STORAGE=true` and there are changes
+- Input/output is `data/sitemap-extracted-data/my_products.jsonl`
+- Records are stored as one-line JSON objects
+- File rewrite is atomic (`.tmp` + replace) when there are changes
 
 ## Crawl Time Extension
 
@@ -243,11 +206,7 @@ Written by the crawl timing extension when each spider closes.
 
 ### `data/logs/pipeline_events.jsonl`
 
-Written by the active pipelines when:
-
-- Elasticsearch upserts happen
-- Redis cache entries are refreshed
-- pipeline-level skip/error events occur
+Reserved for pipeline-level events. This is mainly useful if/when item pipelines are enabled.
 
 ## Useful Commands
 

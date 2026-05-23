@@ -45,3 +45,7 @@
 {"timestamp": "2026-05-21T11:24:15.342053+00:00", "event": "crawl_timing", "spider": "inchand_sitemap_products_update", "reason": "finished", "duration_seconds": 6.987, "requests": 2, "responses": 2, "items": 0}
 {"timestamp": "2026-05-21T11:34:33.021929+00:00", "event": "crawl_timing", "spider": "inchand_sitemap_products_update", "reason": "finished", "duration_seconds": 9.013, "requests": 2, "responses": 2, "items": 0}
 {"timestamp": "2026-05-21T11:35:40.978496+00:00", "event": "crawl_timing", "spider": "inchand_sitemap_products_update", "reason": "finished", "duration_seconds": 6.447, "requests": 2, "responses": 2, "items": 0}
+{"timestamp": "2026-05-23T08:45:35.000619+00:00", "event": "crawl_timing", "spider": "inchand_sitemap_urls", "reason": "finished", "duration_seconds": 1.139, "requests": 1, "responses": 0, "items": 0}
+{"timestamp": "2026-05-23T08:46:13.763306+00:00", "event": "crawl_timing", "spider": "inchand_sitemap_urls", "reason": "finished", "duration_seconds": 33.542, "requests": 30, "responses": 30, "items": 126954}
+{"timestamp": "2026-05-23T08:47:39.953537+00:00", "event": "crawl_timing", "spider": "inchand_sitemap_products", "reason": "shutdown", "duration_seconds": 73.645, "requests": 31, "responses": 31, "items": 29}
+{"timestamp": "2026-05-23T08:48:19.679600+00:00", "event": "crawl_timing", "spider": "inchand_sitemap_products_update", "reason": "finished", "duration_seconds": 25.047, "requests": 31, "responses": 31, "items": 0}
