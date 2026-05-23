@@ -18,6 +18,11 @@ def product_doc_id(url):
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
 
 
+def url_doc_id(url):
+    normalized = str(url or "").strip()
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+
 class ElasticsearchProductStore:
     def __init__(self, base_url, index_name, timeout=15):
         self.base_url = str(base_url or "").rstrip("/")
@@ -90,6 +95,30 @@ class ElasticsearchProductStore:
                 )
 
 
+class ElasticsearchUrlStore:
+    def __init__(self, base_url, index_name, timeout=15):
+        self.base_url = str(base_url or "").rstrip("/")
+        self.index_name = str(index_name or "").strip()
+        self.timeout = timeout
+        self.session = requests.Session()
+
+    def _doc_url(self, url):
+        doc_id = url_doc_id(url)
+        return f"{self.base_url}/{self.index_name}/_doc/{doc_id}"
+
+    def upsert(self, record):
+        url = str(record.get("page_url") or record.get("url") or "").strip()
+        if not url:
+            raise ValueError("Cannot index URL record without page_url/url")
+        response = self.session.put(
+            self._doc_url(url),
+            json=record,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return url_doc_id(url)
+
+
 class RedisProductStore:
     def __init__(self, redis_url, key_prefix):
         self.key_prefix = str(key_prefix or "")
@@ -111,3 +140,35 @@ class RedisProductStore:
             return None
         return payload if isinstance(payload, dict) else None
 
+
+class RedisUrlStore:
+    def __init__(self, redis_url, key_prefix):
+        self.key_prefix = str(key_prefix or "")
+        self.client = redis.from_url(redis_url, decode_responses=True)
+
+    def key(self, url):
+        return f"{self.key_prefix}{url_doc_id(url)}"
+
+    def set(self, url, record):
+        self.client.set(self.key(url), json.dumps(record, ensure_ascii=False))
+
+    def get(self, url):
+        raw = self.client.get(self.key(url))
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def enqueue_request(self, queue_key, url, priority=0, meta=None, dont_filter=True):
+        payload = {
+            "url": str(url).strip(),
+            "priority": int(priority),
+            "dont_filter": bool(dont_filter),
+        }
+        if isinstance(meta, dict) and meta:
+            payload["meta"] = meta
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self.client.zadd(queue_key, {serialized: int(priority)})

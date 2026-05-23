@@ -9,6 +9,7 @@ import jdatetime
 import scrapy
 
 from inchand.log_store import append_jsonl
+from inchand.redis_spider import OptionalRedisSpider
 from inchand.storage import (
     ElasticsearchProductStore,
     RedisProductStore,
@@ -16,7 +17,7 @@ from inchand.storage import (
 )
 
 
-class InchandSitemapProductsUpdateSpider(scrapy.Spider):
+class InchandSitemapProductsUpdateSpider(OptionalRedisSpider):
     name = "inchand_sitemap_products_update"
     allowed_domains = ["inchand.com"]
     default_products_file = "data/sitemap-extracted-data/my_products.jsonl"
@@ -741,7 +742,7 @@ class InchandSitemapProductsUpdateSpider(scrapy.Spider):
             },
         )
 
-    def start_requests(self):
+    def local_start_requests(self):
         self._load_existing_records()
         if not self._ordered_urls:
             source_label = self.products_file if getattr(self, "use_json_storage", False) else "Elasticsearch"

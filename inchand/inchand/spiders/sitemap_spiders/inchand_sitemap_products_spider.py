@@ -8,12 +8,14 @@ import scrapy
 
 from inchand.items import ProductItem
 from inchand.log_store import append_jsonl
+from inchand.redis_spider import OptionalRedisSpider
 from inchand.storage import ElasticsearchProductStore, parse_bool
 
 
-class InchandSitemapProductsSpider(scrapy.Spider):
+class InchandSitemapProductsSpider(OptionalRedisSpider):
     name = "inchand_sitemap_products"
     allowed_domains = ["inchand.com"]
+    redis_queue_key_setting = "REDIS_PRODUCTS_START_URLS_KEY"
     default_urls_file = "data/sitemap-extracted-data/my_shops.json"
     default_products_file = "data/sitemap-extracted-data/my_products.jsonl"
 
@@ -533,7 +535,7 @@ class InchandSitemapProductsSpider(scrapy.Spider):
 
         return normalize_urls(urls)
 
-    def start_requests(self):
+    def local_start_requests(self):
         if not self._existing_product_urls:
             self._existing_product_urls = self._load_existing_product_urls()
         urls = self._load_shop_urls()
